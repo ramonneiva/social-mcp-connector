@@ -100,7 +100,7 @@ const handler = createMcpHandler(
     // ── Facebook Page ────────────────────────────────────────────────────────
     server.tool(
       'facebook_page_insights',
-      'Facebook Page insights: fan_count, followers, page_impressions, page_post_engagements over a time window (default last 7 days). Requires META_ACCESS_TOKEN and META_PAGE_ID.',
+      'Facebook Page insights: followers_count plus page_impressions, page_post_engagements, page_views_total, page_fan_adds over a time window (default last 7 days). Each metric is requested independently, so a deprecated/invalid metric is skipped (reported under insight_errors) rather than failing the tool. Requires META_ACCESS_TOKEN and META_PAGE_ID.',
       {
         days: z.number().int().positive().max(90).optional().describe('Days back from now (default 7).'),
         since: z.string().optional().describe('Start: unix seconds or YYYY-MM-DD.'),
@@ -108,7 +108,7 @@ const handler = createMcpHandler(
         metrics: z
           .string()
           .optional()
-          .describe('Comma-separated metrics. Default "page_impressions,page_post_engagements,page_fans".'),
+          .describe('Comma-separated metrics. Default "page_impressions,page_post_engagements,page_views_total,page_fan_adds".'),
       },
       async (args) => run('Facebook Page insights', () => getFacebookPageInsights(args)),
     );
@@ -160,7 +160,6 @@ const handler = createMcpHandler(
           facebook: fb.ok
             ? {
                 name: (fb.data as any)?.page?.name,
-                fan_count: (fb.data as any)?.page?.fan_count,
                 followers_count: (fb.data as any)?.page?.followers_count,
               }
             : { error: (fb as any).error },

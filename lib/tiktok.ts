@@ -16,7 +16,10 @@ function requireToken(): { value?: string; error?: string } {
   if (!value || !value.trim()) {
     return {
       error:
-        'TIKTOK_ACCESS_TOKEN is not set. Add it to your environment / Vercel project settings.',
+        'TIKTOK_ACCESS_TOKEN is not set. This must be a USER ACCESS TOKEN obtained via the ' +
+        'TikTok Login Kit OAuth flow (scopes: user.info.basic, user.info.profile, ' +
+        'user.info.stats, video.list). TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET alone are NOT ' +
+        'sufficient — they only let you run the OAuth flow to mint this user access token.',
     };
   }
   return { value: value.trim() };
