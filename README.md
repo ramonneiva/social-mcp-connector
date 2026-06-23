@@ -26,6 +26,15 @@ Once deployed to `https://<your-app>.vercel.app`:
 > leave `REDIS_URL` unset and the Streamable HTTP path (`/api/mcp`) works fully
 > without it.
 
+### TikTok OAuth helper endpoints
+
+| Endpoint | Purpose |
+| -------- | ------- |
+| `GET /api/tiktok/auth` | Redirects to TikTok to authorize and generate a token. |
+| `GET /api/tiktok/callback` | Shows the resulting `TIKTOK_ACCESS_TOKEN` to copy into Vercel. |
+
+Start here to get your token: `https://<your-app>.vercel.app/api/tiktok/auth`
+
 ## Tools
 
 See [`tools.md`](./tools.md) for full parameter and return details.
@@ -53,8 +62,9 @@ Copy [`.env.example`](./.env.example) to `.env.local` for local dev, or set thes
 | `META_APP_ID` | optional | App id — only for token debugging / `appsecret_proof`. |
 | `META_APP_SECRET` | optional | App secret — only for token debugging / `appsecret_proof`. |
 | `TIKTOK_ACCESS_TOKEN` | for TikTok tools | User access token from TikTok Login Kit OAuth. |
-| `TIKTOK_CLIENT_KEY` | optional | TikTok app client key (for token refresh). |
-| `TIKTOK_CLIENT_SECRET` | optional | TikTok app client secret (for token refresh). |
+| `TIKTOK_CLIENT_KEY` | for OAuth helper | TikTok app client key. Used by `/api/tiktok/auth` to mint the access token. |
+| `TIKTOK_CLIENT_SECRET` | for OAuth helper | TikTok app client secret. Used by `/api/tiktok/callback` for the token exchange. |
+| `TIKTOK_REDIRECT_URI` | optional | Override the OAuth redirect URI. Defaults to `${origin}/api/tiktok/callback`. Must match the URI registered in the TikTok app. |
 | `MCP_AUTH_TOKEN` | optional | If set, the MCP endpoint requires `Authorization: Bearer <value>`. If unset, the endpoint is **open**. |
 | `REDIS_URL` | optional | Enables SSE resumability. Not needed for Streamable HTTP. |
 
@@ -70,16 +80,39 @@ Copy [`.env.example`](./.env.example) to `.env.local` for local dev, or set thes
    Business portfolio).
 3. A **long-lived** token (short-lived tokens expire in ~1 hour). Exchange via:
    `GET https://graph.facebook.com/v21.0/oauth/access_token?grant_type=fb_exchange_token&client_id=<APP_ID>&client_secret=<APP_SECRET>&fb_exchange_token=<SHORT_LIVED_TOKEN>`
-4. Find your IG user id and Page id:
+4. **You usually only need `META_ACCESS_TOKEN`.** The server auto-discovers the
+   rest: it calls `GET /me/accounts` to find the Page you manage (and its
+   **Page access token**, which Page insights require) and the linked Instagram
+   Business account id. `META_PAGE_ID` / `META_IG_USER_ID` are optional overrides —
+   if set and valid they win; if missing or wrong they are auto-resolved. Each
+   tool's output reports which id was used and its `source` (env vs discovered).
+   To set them explicitly:
    `GET https://graph.facebook.com/v21.0/me/accounts?access_token=<TOKEN>` (Page id),
    then `GET https://graph.facebook.com/v21.0/<PAGE_ID>?fields=instagram_business_account&access_token=<TOKEN>` (IG user id).
 
 ### TikTok prerequisites
 
+The TikTok portal only gives you a **Client Key + Client Secret** — the access
+token must come from the Login Kit OAuth flow. This app includes a helper to do
+that for you:
+
 1. A TikTok developer app with **Login Kit** and the **Display API** enabled.
-2. The account must be **OAuth-connected**, granting scopes:
-   `user.info.basic`, `user.info.profile`, `user.info.stats`, `video.list`.
-3. Use the resulting **user access token** as `TIKTOK_ACCESS_TOKEN`.
+2. Set `TIKTOK_CLIENT_KEY` and `TIKTOK_CLIENT_SECRET` in Vercel (+ optionally
+   `TIKTOK_REDIRECT_URI`) and deploy.
+3. In your TikTok app, register the **Redirect URI**:
+   `https://social-mcp-connector.vercel.app/api/tiktok/callback`
+   (it must match exactly — including https and no trailing slash differences).
+4. Add the scopes: `user.info.basic`, `user.info.profile`, `user.info.stats`,
+   `video.list`.
+5. **Sandbox mode:** add your TikTok account as a **target user** in the app's
+   sandbox, otherwise authorization fails with a scope/permission error.
+6. Visit **`https://social-mcp-connector.vercel.app/api/tiktok/auth`** in a
+   browser. It redirects you to TikTok to authorize, then the callback page
+   displays your `access_token`, `refresh_token`, `expires_in`, and `open_id`.
+7. Copy the `access_token` into Vercel as `TIKTOK_ACCESS_TOKEN` and redeploy.
+
+> The OAuth helper never logs or stores tokens — it only renders them once on the
+> callback page for you to copy.
 
 ## Deploy to Vercel
 

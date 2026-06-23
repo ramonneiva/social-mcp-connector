@@ -5,6 +5,15 @@
  * return a normalised `{ ok, data?, error? }` result. They never throw on a
  * missing env var or an API error. Field/metric requests are made resilient so
  * a single deprecated field/metric does not fail the whole tool.
+ *
+ * Robust id/token discovery (`resolveMetaContext`):
+ *   - Calls GET /me/accounts to find the Page the token manages, its PAGE
+ *     access token (required for Page insights), and any linked Instagram
+ *     Business account.
+ *   - Page:  valid META_PAGE_ID (matched in /me/accounts) → first managed Page.
+ *   - IG id: valid META_IG_USER_ID → instagram_business_account on META_PAGE_ID
+ *            → instagram_business_account from the discovered Page.
+ *   - Reports which id/token was used and its source; never logs tokens.
  */
 
 import { fetchJson } from './fetcher';
@@ -55,73 +64,151 @@ export function resolveWindow(opts: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Instagram Business Account id resolution
+// Discovery: resolve Page id + PAGE token + IG Business Account id
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Resolve the Instagram Business Account id robustly.
- *
- * 1. If META_IG_USER_ID is set, validate it really is an IG account (requesting
- *    an IG-only field). If valid, use it.
- * 2. Otherwise (missing, or it's actually a Page id / invalid), derive the real
- *    IG Business Account id from META_PAGE_ID via
- *    `?fields=instagram_business_account{id,username}`.
- */
-export async function resolveIgUserId(
-  token: string,
-): Promise<{ id?: string; source?: string; username?: string; error?: string }> {
-  const configured = process.env.META_IG_USER_ID?.trim();
-  const page = process.env.META_PAGE_ID?.trim();
+export interface MetaContext {
+  /** Selected Facebook Page id (env or discovered). */
+  pageId?: string;
+  pageName?: string;
+  /** PAGE access token for this page (needed for Page insights). */
+  pageToken?: string;
+  pageSource?: string;
+  /** Resolved Instagram Business Account id. */
+  igId?: string;
+  igUsername?: string;
+  igSource?: string;
+  /** Number of Pages the token manages (from /me/accounts). */
+  pagesFound?: number;
+  /** Discovery-level error (e.g. token manages no Pages). */
+  discoveryError?: string;
+}
 
-  if (configured) {
-    const test = await fetchJson(
-      graphUrl(configured, { fields: 'id,username', access_token: token }),
-    );
-    if (test.ok && test.data?.username !== undefined) {
-      return { id: configured, source: 'META_IG_USER_ID', username: test.data.username };
+interface MePage {
+  id: string;
+  name?: string;
+  access_token?: string;
+  followers_count?: number;
+  instagram_business_account?: { id?: string; username?: string; followers_count?: number };
+}
+
+// Short-lived in-memory memo so a single request (e.g. social_overview) doesn't
+// re-run discovery for the same token. Token value is the key but is never logged.
+const _memo = new Map<string, { ctx: MetaContext; ts: number }>();
+const MEMO_TTL_MS = 60_000;
+
+async function fetchManagedPages(
+  userToken: string,
+): Promise<{ pages?: MePage[]; error?: string }> {
+  const res = await fetchJson(
+    graphUrl('me/accounts', {
+      fields:
+        'id,name,access_token,followers_count,instagram_business_account{id,username,followers_count}',
+      limit: 100,
+      access_token: userToken,
+    }),
+  );
+  if (!res.ok) return { error: res.error };
+  return { pages: (res.data?.data as MePage[]) ?? [] };
+}
+
+/** Validate that an id is really an IG account by requesting an IG-only field. */
+async function validateIgId(
+  userToken: string,
+  id: string,
+): Promise<{ ok: boolean; username?: string }> {
+  const test = await fetchJson(graphUrl(id, { fields: 'id,username', access_token: userToken }));
+  if (test.ok && test.data?.username !== undefined) return { ok: true, username: test.data.username };
+  return { ok: false };
+}
+
+/**
+ * Resolve Page + PAGE token + IG id from env + /me/accounts. Memoised per token.
+ */
+export async function resolveMetaContext(userToken: string): Promise<MetaContext> {
+  const cached = _memo.get(userToken);
+  if (cached && Date.now() - cached.ts < MEMO_TTL_MS) return cached.ctx;
+
+  const configuredPage = process.env.META_PAGE_ID?.trim();
+  const configuredIg = process.env.META_IG_USER_ID?.trim();
+  const ctx: MetaContext = {};
+
+  // 1. Discover managed pages (also yields the PAGE access token + linked IG).
+  const discovery = await fetchManagedPages(userToken);
+  if (discovery.error) {
+    ctx.discoveryError = `Could not list Pages via /me/accounts: ${discovery.error}. The token likely lacks the pages_show_list / pages_read_engagement scopes.`;
+  }
+  const pages = discovery.pages ?? [];
+  ctx.pagesFound = pages.length;
+
+  // 2. Select the Page (+ its page token).
+  let selected: MePage | undefined;
+  if (configuredPage) {
+    const match = pages.find((p) => p.id === configuredPage);
+    if (match) {
+      selected = match;
+      ctx.pageSource = 'META_PAGE_ID (matched in /me/accounts)';
     }
-    // configured id is wrong or is actually a Page id → try to auto-resolve below.
+  }
+  if (!selected && pages.length) {
+    selected = pages[0];
+    ctx.pageSource = configuredPage
+      ? `first Page from /me/accounts (META_PAGE_ID "${configuredPage}" is not among the managed Pages)`
+      : 'first Page from /me/accounts';
+  }
+  if (selected) {
+    ctx.pageId = selected.id;
+    ctx.pageName = selected.name;
+    ctx.pageToken = selected.access_token;
+  } else if (!ctx.discoveryError) {
+    ctx.discoveryError =
+      'The token manages no Facebook Pages (/me/accounts returned 0). Ensure the user has a Facebook Page with a linked Instagram Business/Creator account, and that the token has pages_show_list, pages_read_engagement (and instagram_basic, instagram_manage_insights for IG).';
   }
 
-  if (page) {
+  // 3. Resolve the IG Business Account id, in the requested order.
+  // 3a. valid META_IG_USER_ID
+  if (configuredIg) {
+    const v = await validateIgId(userToken, configuredIg);
+    if (v.ok) {
+      ctx.igId = configuredIg;
+      ctx.igUsername = v.username;
+      ctx.igSource = 'META_IG_USER_ID';
+    }
+  }
+  // 3b. instagram_business_account on META_PAGE_ID
+  if (!ctx.igId && configuredPage) {
     const res = await fetchJson(
-      graphUrl(page, {
-        fields: 'instagram_business_account{id,username,name}',
-        access_token: token,
+      graphUrl(configuredPage, {
+        fields: 'instagram_business_account{id,username}',
+        access_token: userToken,
       }),
     );
-    if (res.ok && res.data?.instagram_business_account?.id) {
-      const iba = res.data.instagram_business_account;
-      return {
-        id: iba.id,
-        username: iba.username,
-        source: configured
-          ? `auto-derived from META_PAGE_ID (META_IG_USER_ID="${configured}" was not a valid IG account)`
-          : 'auto-derived from META_PAGE_ID',
-      };
+    const iba = res.ok ? res.data?.instagram_business_account : undefined;
+    if (iba?.id) {
+      ctx.igId = iba.id;
+      ctx.igUsername = iba.username;
+      ctx.igSource = 'derived from instagram_business_account on META_PAGE_ID';
     }
-    if (res.ok && !res.data?.instagram_business_account) {
-      return {
-        error:
-          'META_PAGE_ID has no linked instagram_business_account. Link an Instagram Business/Creator account to this Facebook Page in Meta settings.',
-      };
-    }
-    return {
-      error: `Could not resolve an Instagram Business Account from META_PAGE_ID: ${
-        res.error || 'instagram_business_account not found on Page.'
-      }`,
-    };
+  }
+  // 3c. instagram_business_account from the discovered Page
+  if (!ctx.igId && selected?.instagram_business_account?.id) {
+    ctx.igId = selected.instagram_business_account.id;
+    ctx.igUsername = selected.instagram_business_account.username;
+    ctx.igSource = `derived from /me/accounts Page ${selected.id}`;
   }
 
-  if (configured) {
-    return {
-      error: `META_IG_USER_ID ("${configured}") is not a valid Instagram Business Account id, and META_PAGE_ID is not set to auto-resolve it. Set META_PAGE_ID (the linked Facebook Page id) or a correct META_IG_USER_ID.`,
-    };
-  }
-  return {
-    error:
-      'Neither META_IG_USER_ID nor META_PAGE_ID is set; cannot resolve an Instagram Business Account.',
-  };
+  _memo.set(userToken, { ctx, ts: Date.now() });
+  return ctx;
+}
+
+/** Build a clear IG-resolution error from the context. */
+function igError(ctx: MetaContext): string {
+  if (ctx.discoveryError) return ctx.discoveryError;
+  return (
+    'Could not resolve an Instagram Business Account. Provide a valid META_IG_USER_ID, or a ' +
+    'META_PAGE_ID / token whose Page has a linked Instagram Business/Creator account ' +
+    '(scopes: instagram_basic, instagram_manage_insights).'
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -132,14 +219,17 @@ export async function getInstagramOverview(): Promise<ToolResult> {
   const token = requireEnv('META_ACCESS_TOKEN');
   if (token.error) return { ok: false, error: token.error };
 
-  const igId = await resolveIgUserId(token.value!);
-  if (igId.error || !igId.id) return { ok: false, error: igId.error };
+  const ctx = await resolveMetaContext(token.value!);
+  if (!ctx.igId) return { ok: false, error: igError(ctx) };
 
   const fields =
     'id,username,name,biography,website,followers_count,follows_count,media_count,profile_picture_url';
-  const res = await fetchJson(graphUrl(igId.id, { fields, access_token: token.value! }));
+  const res = await fetchJson(graphUrl(ctx.igId, { fields, access_token: token.value! }));
   if (!res.ok) return { ok: false, error: res.error };
-  return { ok: true, data: { ig_user_id: igId.id, ig_user_id_source: igId.source, ...res.data } };
+  return {
+    ok: true,
+    data: { ig_user_id: ctx.igId, ig_user_id_source: ctx.igSource, ...res.data },
+  };
 }
 
 export async function getInstagramInsights(opts: {
@@ -151,14 +241,14 @@ export async function getInstagramInsights(opts: {
   const token = requireEnv('META_ACCESS_TOKEN');
   if (token.error) return { ok: false, error: token.error };
 
-  const igId = await resolveIgUserId(token.value!);
-  if (igId.error || !igId.id) return { ok: false, error: igId.error };
+  const ctx = await resolveMetaContext(token.value!);
+  if (!ctx.igId) return { ok: false, error: igError(ctx) };
 
   const { since, until } = resolveWindow(opts);
   const metric = (opts.metrics && opts.metrics.trim()) || 'reach,profile_views,follower_count';
 
   const res = await fetchJson(
-    graphUrl(`${igId.id}/insights`, {
+    graphUrl(`${ctx.igId}/insights`, {
       metric,
       period: 'day',
       since,
@@ -175,8 +265,8 @@ export async function getInstagramInsights(opts: {
   return {
     ok: true,
     data: {
-      ig_user_id: igId.id,
-      ig_user_id_source: igId.source,
+      ig_user_id: ctx.igId,
+      ig_user_id_source: ctx.igSource,
       window: { since, until },
       metric,
       ...res.data,
@@ -191,8 +281,8 @@ export async function getInstagramRecentMedia(opts: {
   const token = requireEnv('META_ACCESS_TOKEN');
   if (token.error) return { ok: false, error: token.error };
 
-  const igId = await resolveIgUserId(token.value!);
-  if (igId.error || !igId.id) return { ok: false, error: igId.error };
+  const ctx = await resolveMetaContext(token.value!);
+  if (!ctx.igId) return { ok: false, error: igError(ctx) };
 
   const limit = Math.min(Math.max(opts.limit ?? 10, 1), 25);
   const includeInsights = opts.includeInsights !== false;
@@ -200,7 +290,7 @@ export async function getInstagramRecentMedia(opts: {
   const fields =
     'id,caption,media_type,media_product_type,permalink,timestamp,like_count,comments_count';
   const listRes = await fetchJson(
-    graphUrl(`${igId.id}/media`, { fields, limit, access_token: token.value! }),
+    graphUrl(`${ctx.igId}/media`, { fields, limit, access_token: token.value! }),
   );
   if (!listRes.ok) return { ok: false, error: listRes.error };
 
@@ -231,7 +321,12 @@ export async function getInstagramRecentMedia(opts: {
 
   return {
     ok: true,
-    data: { ig_user_id: igId.id, ig_user_id_source: igId.source, count: media.length, media },
+    data: {
+      ig_user_id: ctx.igId,
+      ig_user_id_source: ctx.igSource,
+      count: media.length,
+      media,
+    },
   };
 }
 
@@ -257,23 +352,30 @@ export async function getFacebookPageInsights(opts: {
 }): Promise<ToolResult> {
   const token = requireEnv('META_ACCESS_TOKEN');
   if (token.error) return { ok: false, error: token.error };
-  const page = requireEnv('META_PAGE_ID');
-  if (page.error) return { ok: false, error: page.error };
 
-  // Page node fields — only currently-valid ones. `fan_count` is deprecated;
-  // use `followers_count`.
+  const ctx = await resolveMetaContext(token.value!);
+  if (!ctx.pageId) {
+    return {
+      ok: false,
+      error:
+        ctx.discoveryError ??
+        'No Facebook Page could be resolved for this token. Set META_PAGE_ID or ensure the token manages a Page (pages_show_list, pages_read_engagement).',
+    };
+  }
+
+  // Page insights REQUIRE a PAGE access token. Use the discovered one; fall back
+  // to the user token only if the page token is unavailable.
+  const pageToken = ctx.pageToken || token.value!;
+  const usingPageToken = Boolean(ctx.pageToken);
+
+  // Page node fields — only currently-valid ones (`fan_count` is deprecated).
   const nodeRes = await fetchJson(
-    graphUrl(page.value!, {
-      fields: 'id,name,followers_count',
-      access_token: token.value!,
-    }),
+    graphUrl(ctx.pageId, { fields: 'id,name,followers_count', access_token: pageToken }),
   );
 
   const { since, until } = resolveWindow(opts);
   const metricList = (
-    opts.metrics && opts.metrics.trim()
-      ? opts.metrics.split(',')
-      : SAFE_PAGE_METRICS
+    opts.metrics && opts.metrics.trim() ? opts.metrics.split(',') : SAFE_PAGE_METRICS
   )
     .map((m) => m.trim())
     .filter(Boolean);
@@ -282,12 +384,12 @@ export async function getFacebookPageInsights(opts: {
   const perMetric = await Promise.all(
     metricList.map(async (metric) => {
       const r = await fetchJson(
-        graphUrl(`${page.value!}/insights`, {
+        graphUrl(`${ctx.pageId}/insights`, {
           metric,
           period: 'day',
           since,
           until,
-          access_token: token.value!,
+          access_token: pageToken,
         }),
       );
       return { metric, ok: r.ok, data: r.ok ? r.data?.data : undefined, error: r.error };
@@ -314,6 +416,10 @@ export async function getFacebookPageInsights(opts: {
   return {
     ok: true,
     data: {
+      page_id: ctx.pageId,
+      page_id_source: ctx.pageSource,
+      using_page_token: usingPageToken,
+      pages_managed: ctx.pagesFound,
       page: nodeRes.ok ? nodeRes.data : { error: nodeRes.error },
       window: { since, until },
       metrics_requested: metricList,
