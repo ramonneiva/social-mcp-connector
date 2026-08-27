@@ -572,9 +572,10 @@ export async function getInstagramRecentMedia(opts: {
     media.length <
       requestedLimit
   ) {
-    const pageRes =
-      await fetchJson(
-        nextUrl,
+const pageRes: any =
+  await fetchJson(
+    nextUrl,
+  );
       );
 
     if (!pageRes.ok) {
