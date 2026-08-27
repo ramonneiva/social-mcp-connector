@@ -30,11 +30,13 @@ export interface ToolResult<T = any> {
 
 function requireEnv(name: string): { value?: string; error?: string } {
   const value = process.env[name];
+
   if (!value || !value.trim()) {
     return {
       error: `${name} is not set. Add it to your environment / Vercel project settings.`,
     };
   }
+
   return { value: value.trim() };
 }
 
@@ -64,10 +66,16 @@ export function resolveWindow(opts: {
 }): { since: number; until: number } {
   const toUnix = (s?: string): number | undefined => {
     if (!s) return undefined;
-    if (/^\d+$/.test(s)) return parseInt(s, 10);
+
+    if (/^\d+$/.test(s)) {
+      return parseInt(s, 10);
+    }
 
     const t = Date.parse(s);
-    return Number.isNaN(t) ? undefined : Math.floor(t / 1000);
+
+    return Number.isNaN(t)
+      ? undefined
+      : Math.floor(t / 1000);
   };
 
   const nowSec = Math.floor(Date.now() / 1000);
@@ -107,6 +115,7 @@ interface MePage {
   name?: string;
   access_token?: string;
   followers_count?: number;
+
   instagram_business_account?: {
     id?: string;
     username?: string;
@@ -130,7 +139,9 @@ async function fetchManagedPages(
     }),
   );
 
-  if (!res.ok) return { error: res.error };
+  if (!res.ok) {
+    return { error: res.error };
+  }
 
   return {
     pages: (res.data?.data as MePage[]) ?? [],
@@ -172,13 +183,17 @@ export async function resolveMetaContext(
     return cached.ctx;
   }
 
-  const configuredPage = process.env.META_PAGE_ID?.trim();
-  const configuredIg = process.env.META_IG_USER_ID?.trim();
+  const configuredPage =
+    process.env.META_PAGE_ID?.trim();
+
+  const configuredIg =
+    process.env.META_IG_USER_ID?.trim();
 
   const ctx: MetaContext = {};
 
   // 1. Discover managed pages.
-  const discovery = await fetchManagedPages(userToken);
+  const discovery =
+    await fetchManagedPages(userToken);
 
   if (discovery.error) {
     ctx.discoveryError =
@@ -186,33 +201,45 @@ export async function resolveMetaContext(
       `The token likely lacks the pages_show_list / pages_read_engagement scopes.`;
   }
 
-  const pages = discovery.pages ?? [];
-  ctx.pagesFound = pages.length;
+  const pages =
+    discovery.pages ?? [];
+
+  ctx.pagesFound =
+    pages.length;
 
   // 2. Select Page.
   let selected: MePage | undefined;
 
   if (configuredPage) {
-    const match = pages.find((p) => p.id === configuredPage);
+    const match =
+      pages.find((p) => p.id === configuredPage);
 
     if (match) {
       selected = match;
-      ctx.pageSource = 'META_PAGE_ID (matched in /me/accounts)';
+
+      ctx.pageSource =
+        'META_PAGE_ID (matched in /me/accounts)';
     }
   }
 
   if (!selected && pages.length) {
     selected = pages[0];
 
-    ctx.pageSource = configuredPage
-      ? `first Page from /me/accounts (META_PAGE_ID "${configuredPage}" is not among the managed Pages)`
-      : 'first Page from /me/accounts';
+    ctx.pageSource =
+      configuredPage
+        ? `first Page from /me/accounts (META_PAGE_ID "${configuredPage}" is not among the managed Pages)`
+        : 'first Page from /me/accounts';
   }
 
   if (selected) {
-    ctx.pageId = selected.id;
-    ctx.pageName = selected.name;
-    ctx.pageToken = selected.access_token;
+    ctx.pageId =
+      selected.id;
+
+    ctx.pageName =
+      selected.name;
+
+    ctx.pageToken =
+      selected.access_token;
   } else if (!ctx.discoveryError) {
     ctx.discoveryError =
       'The token manages no Facebook Pages (/me/accounts returned 0). ' +
@@ -223,41 +250,66 @@ export async function resolveMetaContext(
 
   // 3a. Valid META_IG_USER_ID.
   if (configuredIg) {
-    const v = await validateIgId(userToken, configuredIg);
+    const v =
+      await validateIgId(
+        userToken,
+        configuredIg,
+      );
 
     if (v.ok) {
-      ctx.igId = configuredIg;
-      ctx.igUsername = v.username;
-      ctx.igSource = 'META_IG_USER_ID';
+      ctx.igId =
+        configuredIg;
+
+      ctx.igUsername =
+        v.username;
+
+      ctx.igSource =
+        'META_IG_USER_ID';
     }
   }
 
   // 3b. Instagram account on META_PAGE_ID.
   if (!ctx.igId && configuredPage) {
-    const res = await fetchJson(
-      graphUrl(configuredPage, {
-        fields: 'instagram_business_account{id,username}',
-        access_token: userToken,
-      }),
-    );
+    const res =
+      await fetchJson(
+        graphUrl(configuredPage, {
+          fields:
+            'instagram_business_account{id,username}',
+          access_token:
+            userToken,
+        }),
+      );
 
-    const iba = res.ok
-      ? res.data?.instagram_business_account
-      : undefined;
+    const iba =
+      res.ok
+        ? res.data?.instagram_business_account
+        : undefined;
 
     if (iba?.id) {
-      ctx.igId = iba.id;
-      ctx.igUsername = iba.username;
+      ctx.igId =
+        iba.id;
+
+      ctx.igUsername =
+        iba.username;
+
       ctx.igSource =
         'derived from instagram_business_account on META_PAGE_ID';
     }
   }
 
   // 3c. Instagram account from discovered Page.
-  if (!ctx.igId && selected?.instagram_business_account?.id) {
-    ctx.igId = selected.instagram_business_account.id;
-    ctx.igUsername = selected.instagram_business_account.username;
-    ctx.igSource = `derived from /me/accounts Page ${selected.id}`;
+  if (
+    !ctx.igId &&
+    selected?.instagram_business_account?.id
+  ) {
+    ctx.igId =
+      selected.instagram_business_account.id;
+
+    ctx.igUsername =
+      selected.instagram_business_account.username;
+
+    ctx.igSource =
+      `derived from /me/accounts Page ${selected.id}`;
   }
 
   _memo.set(userToken, {
@@ -269,7 +321,9 @@ export async function resolveMetaContext(
 }
 
 /** Build a clear IG-resolution error from the context. */
-function igError(ctx: MetaContext): string {
+function igError(
+  ctx: MetaContext,
+): string {
   if (ctx.discoveryError) {
     return ctx.discoveryError;
   }
@@ -287,7 +341,8 @@ function igError(ctx: MetaContext): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function getInstagramOverview(): Promise<ToolResult> {
-  const token = requireEnv('META_ACCESS_TOKEN');
+  const token =
+    requireEnv('META_ACCESS_TOKEN');
 
   if (token.error) {
     return {
@@ -296,7 +351,10 @@ export async function getInstagramOverview(): Promise<ToolResult> {
     };
   }
 
-  const ctx = await resolveMetaContext(token.value!);
+  const ctx =
+    await resolveMetaContext(
+      token.value!,
+    );
 
   if (!ctx.igId) {
     return {
@@ -308,12 +366,14 @@ export async function getInstagramOverview(): Promise<ToolResult> {
   const fields =
     'id,username,name,biography,website,followers_count,follows_count,media_count,profile_picture_url';
 
-  const res = await fetchJson(
-    graphUrl(ctx.igId, {
-      fields,
-      access_token: token.value!,
-    }),
-  );
+  const res =
+    await fetchJson(
+      graphUrl(ctx.igId, {
+        fields,
+        access_token:
+          token.value!,
+      }),
+    );
 
   if (!res.ok) {
     return {
@@ -325,8 +385,12 @@ export async function getInstagramOverview(): Promise<ToolResult> {
   return {
     ok: true,
     data: {
-      ig_user_id: ctx.igId,
-      ig_user_id_source: ctx.igSource,
+      ig_user_id:
+        ctx.igId,
+
+      ig_user_id_source:
+        ctx.igSource,
+
       ...res.data,
     },
   };
@@ -338,7 +402,8 @@ export async function getInstagramInsights(opts: {
   until?: string;
   metrics?: string;
 }): Promise<ToolResult> {
-  const token = requireEnv('META_ACCESS_TOKEN');
+  const token =
+    requireEnv('META_ACCESS_TOKEN');
 
   if (token.error) {
     return {
@@ -347,7 +412,10 @@ export async function getInstagramInsights(opts: {
     };
   }
 
-  const ctx = await resolveMetaContext(token.value!);
+  const ctx =
+    await resolveMetaContext(
+      token.value!,
+    );
 
   if (!ctx.igId) {
     return {
@@ -356,21 +424,28 @@ export async function getInstagramInsights(opts: {
     };
   }
 
-  const { since, until } = resolveWindow(opts);
+  const { since, until } =
+    resolveWindow(opts);
 
   const metric =
-    (opts.metrics && opts.metrics.trim()) ||
+    (opts.metrics &&
+      opts.metrics.trim()) ||
     'reach,profile_views,follower_count';
 
-  const res = await fetchJson(
-    graphUrl(`${ctx.igId}/insights`, {
-      metric,
-      period: 'day',
-      since,
-      until,
-      access_token: token.value!,
-    }),
-  );
+  const res =
+    await fetchJson(
+      graphUrl(
+        `${ctx.igId}/insights`,
+        {
+          metric,
+          period: 'day',
+          since,
+          until,
+          access_token:
+            token.value!,
+        },
+      ),
+    );
 
   if (!res.ok) {
     return {
@@ -385,13 +460,19 @@ export async function getInstagramInsights(opts: {
   return {
     ok: true,
     data: {
-      ig_user_id: ctx.igId,
-      ig_user_id_source: ctx.igSource,
+      ig_user_id:
+        ctx.igId,
+
+      ig_user_id_source:
+        ctx.igSource,
+
       window: {
         since,
         until,
       },
+
       metric,
+
       ...res.data,
     },
   };
@@ -421,7 +502,8 @@ export async function getInstagramRecentMedia(opts: {
   limit?: number;
   includeInsights?: boolean;
 }): Promise<ToolResult> {
-  const token = requireEnv('META_ACCESS_TOKEN');
+  const token =
+    requireEnv('META_ACCESS_TOKEN');
 
   if (token.error) {
     return {
@@ -430,7 +512,10 @@ export async function getInstagramRecentMedia(opts: {
     };
   }
 
-  const ctx = await resolveMetaContext(token.value!);
+  const ctx =
+    await resolveMetaContext(
+      token.value!,
+    );
 
   if (!ctx.igId) {
     return {
@@ -439,10 +524,16 @@ export async function getInstagramRecentMedia(opts: {
     };
   }
 
-  const limit = Math.min(
-    Math.max(opts.limit ?? 10, 1),
-    25,
-  );
+  // Quantidade total solicitada pela ferramenta MCP.
+  // A Meta pagina os resultados, então seguimos paging.next automaticamente.
+  const requestedLimit =
+    Math.min(
+      Math.max(
+        opts.limit ?? 50,
+        1,
+      ),
+      500,
+    );
 
   const includeInsights =
     opts.includeInsights !== false;
@@ -450,91 +541,272 @@ export async function getInstagramRecentMedia(opts: {
   const fields =
     'id,caption,media_type,media_product_type,permalink,timestamp,like_count,comments_count';
 
-  const listRes = await fetchJson(
-    graphUrl(`${ctx.igId}/media`, {
-      fields,
-      limit,
-      access_token: token.value!,
-    }),
-  );
+  const media: any[] = [];
 
-  if (!listRes.ok) {
-    return {
-      ok: false,
-      error: listRes.error,
-    };
+  // Primeira página da Meta.
+  let nextUrl:
+    | string
+    | undefined =
+    graphUrl(
+      `${ctx.igId}/media`,
+      {
+        fields,
+
+        // Tamanho de cada página.
+        // O requestedLimit continua sendo o limite total.
+        limit:
+          Math.min(
+            requestedLimit,
+            100,
+          ),
+
+        access_token:
+          token.value!,
+      },
+    );
+
+  // Continua buscando páginas até atingir a quantidade solicitada
+  // ou até a Meta informar que não há mais resultados.
+  while (
+    nextUrl &&
+    media.length <
+      requestedLimit
+  ) {
+    const pageRes =
+      await fetchJson(
+        nextUrl,
+      );
+
+    if (!pageRes.ok) {
+      return {
+        ok: false,
+        error:
+          pageRes.error,
+      };
+    }
+
+    const pageItems:
+      any[] =
+      pageRes.data?.data ??
+      [];
+
+    media.push(
+      ...pageItems,
+    );
+
+    if (!pageItems.length) {
+      break;
+    }
+
+    nextUrl =
+      pageRes.data
+        ?.paging
+        ?.next;
   }
 
-  const media: any[] =
-    listRes.data?.data ?? [];
+  // Nunca devolve mais do que foi solicitado.
+  const selectedMedia =
+    media.slice(
+      0,
+      requestedLimit,
+    );
 
-  if (includeInsights && media.length) {
-    await Promise.all(
-      media.map(async (m) => {
-        const insights: Record<string, any> = {};
-        const insightErrors: Record<string, string> = {};
+  if (
+    includeInsights &&
+    selectedMedia.length
+  ) {
+    /**
+     * Evita disparar centenas de chamadas simultaneamente
+     * quando analisarmos 100, 200 ou mais Reels.
+     */
+    const CONCURRENCY = 8;
 
-        /**
-         * Reels support the advanced metrics we want.
-         *
-         * Other media products may support a smaller metric set, so use
-         * reach + total_interactions for them.
-         */
-        const metrics =
-          m.media_product_type === 'REELS'
-            ? REEL_INSIGHT_METRICS
-            : ['reach', 'total_interactions'];
-
-        const results = await Promise.all(
-          metrics.map(async (metric) => {
-            const response = await fetchJson(
-              graphUrl(`${m.id}/insights`, {
-                metric,
-                access_token: token.value!,
-              }),
-            );
-
-            return {
-              metric,
-              response,
-            };
-          }),
+    for (
+      let i = 0;
+      i <
+      selectedMedia.length;
+      i += CONCURRENCY
+    ) {
+      const batch =
+        selectedMedia.slice(
+          i,
+          i + CONCURRENCY,
         );
 
-        for (const result of results) {
-          const { metric, response } = result;
+      await Promise.all(
+        batch.map(
+          async (m) => {
+            const insights:
+              Record<
+                string,
+                any
+              > = {};
 
-          if (response.ok) {
-            const item =
-              response.data?.data?.[0];
+            const insightErrors:
+              Record<
+                string,
+                string
+              > = {};
 
-            insights[metric] =
-              item?.values?.[0]?.value ??
-              item?.total_value?.value ??
-              null;
-          } else {
-            insightErrors[metric] =
-              response.error ??
-              'unknown error';
-          }
-        }
+            const metrics =
+              m.media_product_type ===
+              'REELS'
+                ? REEL_INSIGHT_METRICS
+                : [
+                    'reach',
+                    'total_interactions',
+                  ];
 
-        m.insights = insights;
+            /**
+             * Primeiro tenta buscar todas as métricas daquele Reel
+             * numa única chamada.
+             *
+             * Isso reduz drasticamente a quantidade de requests.
+             */
+            const combined =
+              await fetchJson(
+                graphUrl(
+                  `${m.id}/insights`,
+                  {
+                    metric:
+                      metrics.join(
+                        ',',
+                      ),
 
-        if (Object.keys(insightErrors).length) {
-          m.insight_errors = insightErrors;
-        }
-      }),
-    );
+                    access_token:
+                      token.value!,
+                  },
+                ),
+              );
+
+            if (combined.ok) {
+              for (
+                const item of
+                  combined.data
+                    ?.data ?? []
+              ) {
+                insights[
+                  item.name
+                ] =
+                  item.values
+                    ?.[0]
+                    ?.value ??
+                  item
+                    .total_value
+                    ?.value ??
+                  null;
+              }
+            } else {
+              /**
+               * Fallback:
+               *
+               * Se uma métrica fizer a chamada conjunta falhar,
+               * busca cada métrica individualmente.
+               *
+               * Assim uma métrica incompatível não derruba todas as outras.
+               */
+              const results =
+                await Promise.all(
+                  metrics.map(
+                    async (
+                      metric,
+                    ) => {
+                      const response =
+                        await fetchJson(
+                          graphUrl(
+                            `${m.id}/insights`,
+                            {
+                              metric,
+
+                              access_token:
+                                token.value!,
+                            },
+                          ),
+                        );
+
+                      return {
+                        metric,
+                        response,
+                      };
+                    },
+                  ),
+                );
+
+              for (
+                const result of
+                  results
+              ) {
+                const {
+                  metric,
+                  response,
+                } = result;
+
+                if (
+                  response.ok
+                ) {
+                  const item =
+                    response
+                      .data
+                      ?.data
+                      ?.[0];
+
+                  insights[
+                    metric
+                  ] =
+                    item
+                      ?.values
+                      ?.[0]
+                      ?.value ??
+                    item
+                      ?.total_value
+                      ?.value ??
+                    null;
+                } else {
+                  insightErrors[
+                    metric
+                  ] =
+                    response
+                      .error ??
+                    'unknown error';
+                }
+              }
+            }
+
+            m.insights =
+              insights;
+
+            if (
+              Object.keys(
+                insightErrors,
+              ).length
+            ) {
+              m.insight_errors =
+                insightErrors;
+            }
+          },
+        ),
+      );
+    }
   }
 
   return {
     ok: true,
+
     data: {
-      ig_user_id: ctx.igId,
-      ig_user_id_source: ctx.igSource,
-      count: media.length,
-      media,
+      ig_user_id:
+        ctx.igId,
+
+      ig_user_id_source:
+        ctx.igSource,
+
+      requested_limit:
+        requestedLimit,
+
+      count:
+        selectedMedia.length,
+
+      media:
+        selectedMedia,
     },
   };
 }
@@ -556,7 +828,8 @@ export async function getFacebookPageInsights(opts: {
   until?: string;
   metrics?: string;
 }): Promise<ToolResult> {
-  const token = requireEnv('META_ACCESS_TOKEN');
+  const token =
+    requireEnv('META_ACCESS_TOKEN');
 
   if (token.error) {
     return {
@@ -565,113 +838,190 @@ export async function getFacebookPageInsights(opts: {
     };
   }
 
-  const ctx = await resolveMetaContext(token.value!);
+  const ctx =
+    await resolveMetaContext(
+      token.value!,
+    );
 
   if (!ctx.pageId) {
     return {
       ok: false,
+
       error:
         ctx.discoveryError ??
         'No Facebook Page could be resolved for this token. ' +
-        'Set META_PAGE_ID or ensure the token manages a Page.',
+          'Set META_PAGE_ID or ensure the token manages a Page.',
     };
   }
 
   // Page insights require a PAGE access token.
   const pageToken =
-    ctx.pageToken || token.value!;
+    ctx.pageToken ||
+    token.value!;
 
   const usingPageToken =
-    Boolean(ctx.pageToken);
+    Boolean(
+      ctx.pageToken,
+    );
 
-  const nodeRes = await fetchJson(
-    graphUrl(ctx.pageId, {
-      fields: 'id,name,followers_count',
-      access_token: pageToken,
-    }),
-  );
+  const nodeRes =
+    await fetchJson(
+      graphUrl(
+        ctx.pageId,
+        {
+          fields:
+            'id,name,followers_count',
+
+          access_token:
+            pageToken,
+        },
+      ),
+    );
 
   const { since, until } =
     resolveWindow(opts);
 
-  const metricList = (
-    opts.metrics && opts.metrics.trim()
-      ? opts.metrics.split(',')
-      : SAFE_PAGE_METRICS
-  )
-    .map((m) => m.trim())
-    .filter(Boolean);
+  const metricList =
+    (
+      opts.metrics &&
+      opts.metrics.trim()
+        ? opts.metrics.split(
+            ',',
+          )
+        : SAFE_PAGE_METRICS
+    )
+      .map(
+        (m) => m.trim(),
+      )
+      .filter(Boolean);
 
-  // Request each metric independently.
-  const perMetric = await Promise.all(
-    metricList.map(async (metric) => {
-      const r = await fetchJson(
-        graphUrl(`${ctx.pageId}/insights`, {
+  // Request each Page metric independently.
+  const perMetric =
+    await Promise.all(
+      metricList.map(
+        async (
           metric,
-          period: 'day',
-          since,
-          until,
-          access_token: pageToken,
-        }),
-      );
+        ) => {
+          const r =
+            await fetchJson(
+              graphUrl(
+                `${ctx.pageId}/insights`,
+                {
+                  metric,
+                  period:
+                    'day',
+                  since,
+                  until,
 
-      return {
-        metric,
-        ok: r.ok,
-        data: r.ok
-          ? r.data?.data
-          : undefined,
-        error: r.error,
-      };
-    }),
-  );
+                  access_token:
+                    pageToken,
+                },
+              ),
+            );
 
-  const insights: Record<string, any> = {};
-  const insightErrors: Record<string, string> = {};
+          return {
+            metric,
 
-  for (const x of perMetric) {
+            ok: r.ok,
+
+            data:
+              r.ok
+                ? r.data
+                    ?.data
+                : undefined,
+
+            error:
+              r.error,
+          };
+        },
+      ),
+    );
+
+  const insights:
+    Record<
+      string,
+      any
+    > = {};
+
+  const insightErrors:
+    Record<
+      string,
+      string
+    > = {};
+
+  for (
+    const x of
+      perMetric
+  ) {
     if (x.ok) {
-      insights[x.metric] = x.data;
+      insights[
+        x.metric
+      ] = x.data;
     } else {
-      insightErrors[x.metric] =
-        x.error ?? 'unknown error';
+      insightErrors[
+        x.metric
+      ] =
+        x.error ??
+        'unknown error';
     }
   }
 
   // Hard failure only if Page node AND every metric failed.
   if (
     !nodeRes.ok &&
-    Object.keys(insights).length === 0
+    Object.keys(
+      insights,
+    ).length === 0
   ) {
     return {
       ok: false,
+
       error:
         `Page node: ${nodeRes.error}; ` +
         `all requested insight metrics failed (` +
-        `${Object.values(insightErrors).join(' | ')})`,
+        `${Object.values(
+          insightErrors,
+        ).join(' | ')})`,
     };
   }
 
   return {
     ok: true,
+
     data: {
-      page_id: ctx.pageId,
-      page_id_source: ctx.pageSource,
-      using_page_token: usingPageToken,
-      pages_managed: ctx.pagesFound,
-      page: nodeRes.ok
-        ? nodeRes.data
-        : {
-            error: nodeRes.error,
-          },
+      page_id:
+        ctx.pageId,
+
+      page_id_source:
+        ctx.pageSource,
+
+      using_page_token:
+        usingPageToken,
+
+      pages_managed:
+        ctx.pagesFound,
+
+      page:
+        nodeRes.ok
+          ? nodeRes.data
+          : {
+              error:
+                nodeRes.error,
+            },
+
       window: {
         since,
         until,
       },
+
       metrics_requested:
         metricList,
+
       insights,
-      ...(Object.keys(insightErrors).length
+
+      ...(Object.keys(
+        insightErrors,
+      ).length
         ? {
             insight_errors:
               insightErrors,
