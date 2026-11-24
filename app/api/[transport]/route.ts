@@ -6,6 +6,7 @@ import {
   getInstagramInsights,
   getInstagramRecentMedia,
   getFacebookPageInsights,
+  getFacebookRecentVideos,
   type ToolResult,
 } from '@/lib/meta';
 
@@ -215,7 +216,7 @@ const handler =
       server.tool(
         'facebook_page_insights',
 
-        'Facebook Page insights: followers_count plus page_impressions, page_post_engagements, page_views_total and page_fan_adds over a time window (default last 7 days). Each metric is requested independently, so a deprecated or invalid metric is skipped rather than failing the entire tool. Requires META_ACCESS_TOKEN and META_PAGE_ID.',
+        'Facebook Page insights: followers_count plus page_post_engagements, page_views_total, page_media_view and page_daily_follows_unique over a time window (default last 7 days). Each metric is requested independently, so a deprecated or invalid metric is skipped rather than failing the entire tool. Requires META_ACCESS_TOKEN and META_PAGE_ID.',
 
         {
           days: z
@@ -246,7 +247,7 @@ const handler =
             .string()
             .optional()
             .describe(
-              'Comma-separated metrics. Default "page_impressions,page_post_engagements,page_views_total,page_fan_adds".',
+              'Comma-separated metrics. Default "page_post_engagements,page_views_total,page_media_view,page_daily_follows_unique".',
             ),
         },
 
@@ -255,6 +256,40 @@ const handler =
             'Facebook Page insights',
             () =>
               getFacebookPageInsights(
+                args,
+              ),
+          ),
+      );
+
+      server.tool(
+        'facebook_recent_videos',
+
+        'Most recent Facebook Page videos and Reels with per-video metrics: views, replays, reach, average watch time (seconds and % of length), total watch time, retention at 3 seconds and at the end (from the retention graph), reactions, comments, shares and new followers. Newest first. Requires META_ACCESS_TOKEN (scopes pages_read_engagement, pages_read_user_content, read_insights) and META_PAGE_ID.',
+
+        {
+          limit: z
+            .number()
+            .int()
+            .positive()
+            .max(50)
+            .optional()
+            .describe(
+              'How many recent videos/Reels to return (1-50, default 10).',
+            ),
+
+          includeRetentionGraph: z
+            .boolean()
+            .optional()
+            .describe(
+              'Also return the full retention graph for each video. Default false.',
+            ),
+        },
+
+        async (args) =>
+          run(
+            'Facebook recent videos',
+            () =>
+              getFacebookRecentVideos(
                 args,
               ),
           ),

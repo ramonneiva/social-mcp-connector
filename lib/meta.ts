@@ -583,11 +583,13 @@ export async function getInstagramRecentMedia(opts: {
 // Facebook Page
 // ─────────────────────────────────────────────────────────────────────────────
 
+// page_impressions and page_fan_adds were retired by Meta; their replacements
+// are page_media_view (views of Page content) and page_daily_follows_unique.
 const SAFE_PAGE_METRICS = [
-  'page_impressions',
   'page_post_engagements',
   'page_views_total',
-  'page_fan_adds',
+  'page_media_view',
+  'page_daily_follows_unique',
 ];
 
 export async function getFacebookPageInsights(opts: {
@@ -718,6 +720,307 @@ export async function getFacebookPageInsights(opts: {
             insight_errors: insightErrors,
           }
         : {}),
+    },
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Facebook Page videos / Reels with per-video metrics
+// ─────────────────────────────────────────────────────────────────────────────
+
+const VIDEO_FIELDS =
+  'id,title,description,created_time,length,permalink_url';
+
+function toNumber(v: any): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function firstNumber(...vals: any[]): number | null {
+  for (const v of vals) {
+    const n = toNumber(v);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
+function sumObject(v: any): number | null {
+  if (!v || typeof v !== 'object') return null;
+  let total = 0;
+  let any = false;
+  for (const x of Object.values(v)) {
+    const n = toNumber(x);
+    if (n !== null) {
+      total += n;
+      any = true;
+    }
+  }
+  return any ? total : null;
+}
+
+function round1(n: number | null): number | null {
+  return n === null ? null : Math.round(n * 10) / 10;
+}
+
+/**
+ * Turn Meta's retention graph ({"0": 1, "1": 0.93, ...}, values 0–1) into
+ * retention at 3 s and at the end, in percent.
+ *
+ * Meta returns either one point per second, or a fixed number of points
+ * spread evenly over the video (classic videos use ~40 intervals). When the
+ * number of points is close to the video length we treat it as per-second;
+ * otherwise as evenly spaced.
+ */
+function summariseRetention(
+  graph: any,
+  lengthSec: number | null,
+): {
+  ret3_pct: number | null;
+  ret_end_pct: number | null;
+  mode?: 'per_second' | 'evenly_spaced';
+  points?: number;
+} {
+  if (!graph || typeof graph !== 'object') {
+    return { ret3_pct: null, ret_end_pct: null };
+  }
+
+  const pts = Object.entries(graph)
+    .map(([k, v]) => [Number(k), toNumber(v)] as [number, number | null])
+    .filter(([k, v]) => Number.isFinite(k) && v !== null)
+    .sort((a, b) => a[0] - b[0]) as [number, number][];
+
+  if (!pts.length) return { ret3_pct: null, ret_end_pct: null };
+
+  const scale = pts.some(([, v]) => v > 1.5) ? 1 : 100; // already % or 0–1
+  const last = pts[pts.length - 1][1] * scale;
+  const maxKey = pts[pts.length - 1][0];
+
+  let mode: 'per_second' | 'evenly_spaced' = 'per_second';
+  let idxAt3 = 3;
+
+  if (lengthSec && lengthSec > 0 && Math.abs(maxKey - lengthSec) > 2) {
+    mode = 'evenly_spaced';
+    idxAt3 = Math.round((3 / lengthSec) * maxKey);
+  }
+
+  const at3 =
+    pts.find(([k]) => k >= idxAt3)?.[1] ?? pts[pts.length - 1][1];
+
+  return {
+    ret3_pct: round1(at3 * scale),
+    ret_end_pct: round1(last),
+    mode,
+    points: pts.length,
+  };
+}
+
+async function listPageVideos(
+  pageId: string,
+  pageToken: string,
+  limit: number,
+): Promise<{ items: any[]; errors: Record<string, string> }> {
+  const errors: Record<string, string> = {};
+
+  const [reels, videos] = await Promise.all([
+    fetchJson(
+      graphUrl(`${pageId}/video_reels`, {
+        fields: VIDEO_FIELDS,
+        limit,
+        access_token: pageToken,
+      }),
+    ),
+    fetchJson(
+      graphUrl(`${pageId}/videos`, {
+        fields: VIDEO_FIELDS,
+        limit,
+        access_token: pageToken,
+      }),
+    ),
+  ]);
+
+  const byId = new Map<string, any>();
+
+  if (reels.ok) {
+    for (const r of reels.data?.data ?? []) {
+      byId.set(r.id, { ...r, kind: 'reel' });
+    }
+  } else {
+    errors.video_reels = reels.error ?? 'unknown error';
+  }
+
+  if (videos.ok) {
+    for (const v of videos.data?.data ?? []) {
+      if (!byId.has(v.id)) byId.set(v.id, { ...v, kind: 'video' });
+    }
+  } else {
+    errors.videos = videos.error ?? 'unknown error';
+  }
+
+  const items = [...byId.values()]
+    .sort(
+      (a, b) =>
+        Date.parse(b.created_time || 0) - Date.parse(a.created_time || 0),
+    )
+    .slice(0, limit);
+
+  return { items, errors };
+}
+
+export async function getFacebookRecentVideos(opts: {
+  limit?: number;
+  includeRetentionGraph?: boolean;
+}): Promise<ToolResult> {
+  const token = requireEnv('META_ACCESS_TOKEN');
+
+  if (token.error) {
+    return { ok: false, error: token.error };
+  }
+
+  const ctx = await resolveMetaContext(token.value!);
+
+  if (!ctx.pageId) {
+    return {
+      ok: false,
+      error:
+        ctx.discoveryError ??
+        'No Facebook Page could be resolved for this token. ' +
+          'Set META_PAGE_ID or ensure the token manages a Page.',
+    };
+  }
+
+  const pageToken = ctx.pageToken || token.value!;
+  const limit = Math.min(Math.max(opts.limit ?? 10, 1), 50);
+
+  const { items, errors: listErrors } = await listPageVideos(
+    ctx.pageId,
+    pageToken,
+    limit,
+  );
+
+  if (!items.length && Object.keys(listErrors).length) {
+    return {
+      ok: false,
+      error:
+        'Could not list Page videos/Reels: ' +
+        Object.entries(listErrors)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join(' | ') +
+        '. The token needs pages_read_engagement, pages_read_user_content and read_insights.',
+    };
+  }
+
+  const CONCURRENCY = 5;
+
+  for (let i = 0; i < items.length; i += CONCURRENCY) {
+    const batch = items.slice(i, i + CONCURRENCY);
+
+    await Promise.all(
+      batch.map(async (v) => {
+        const [ins, counts] = await Promise.all([
+          // No `metric` param: Meta returns every lifetime metric available
+          // for this video type (Reels and classic videos differ).
+          fetchJson(
+            graphUrl(`${v.id}/video_insights`, {
+              access_token: pageToken,
+            }),
+          ),
+          fetchJson(
+            graphUrl(v.id, {
+              fields:
+                'likes.limit(0).summary(true),comments.limit(0).summary(true)',
+              access_token: pageToken,
+            }),
+          ),
+        ]);
+
+        const raw: Record<string, any> = {};
+
+        if (ins.ok) {
+          for (const item of ins.data?.data ?? []) {
+            raw[item.name] =
+              item.values?.[0]?.value ?? item.total_value?.value ?? null;
+          }
+        } else {
+          v.insights_error = ins.error ?? 'unknown error';
+        }
+
+        const social = raw.post_video_social_actions;
+        const socialObj =
+          social && typeof social === 'object' ? social : {};
+        const pick = (...keys: string[]) => {
+          for (const [k, val] of Object.entries(socialObj)) {
+            if (keys.includes(k.toLowerCase())) return toNumber(val);
+          }
+          return null;
+        };
+
+        const lengthSec = toNumber(v.length);
+        const avgMs = firstNumber(
+          raw.post_video_avg_time_watched,
+          raw.total_video_avg_time_watched,
+        );
+        const totalMs = firstNumber(
+          raw.post_video_view_time,
+          raw.total_video_view_total_time,
+        );
+
+        const graph =
+          raw.post_video_retention_graph ?? raw.total_video_retention_graph;
+        const retention = summariseRetention(graph, lengthSec);
+
+        v.metrics = {
+          views: firstNumber(
+            raw.fb_reels_total_plays,
+            raw.blue_reels_play_count,
+            raw.total_video_views,
+          ),
+          replays: firstNumber(raw.fb_reels_replay_count),
+          reach: firstNumber(
+            raw.post_impressions_unique,
+            raw.total_video_impressions_unique,
+          ),
+          avg_watch_sec: avgMs === null ? null : round1(avgMs / 1000),
+          avg_watch_pct:
+            avgMs !== null && lengthSec
+              ? round1((avgMs / 1000 / lengthSec) * 100)
+              : null,
+          total_watch_min:
+            totalMs === null ? null : round1(totalMs / 60000),
+          ret3_pct: retention.ret3_pct,
+          ret_end_pct: retention.ret_end_pct,
+          reactions: firstNumber(
+            sumObject(raw.post_video_likes_by_reaction_type),
+            pick('reaction', 'like', 'likes'),
+            counts.ok ? counts.data?.likes?.summary?.total_count : null,
+          ),
+          comments: firstNumber(
+            pick('comment', 'comments'),
+            counts.ok ? counts.data?.comments?.summary?.total_count : null,
+          ),
+          shares: pick('share', 'shares'),
+          new_followers: firstNumber(raw.post_video_followers),
+        };
+
+        v.retention_mode = retention.mode;
+        if (opts.includeRetentionGraph && graph) v.retention_graph = graph;
+        v.raw_insights = raw;
+      }),
+    );
+  }
+
+  return {
+    ok: true,
+    data: {
+      page_id: ctx.pageId,
+      page_name: ctx.pageName,
+      page_id_source: ctx.pageSource,
+      requested_limit: limit,
+      count: items.length,
+      notes:
+        'ret3_pct / ret_end_pct come from Meta\'s retention graph (percent of viewers still watching at 3 s and at the end). Fields Meta does not return for a video are null; raw_insights shows everything Meta sent.',
+      ...(Object.keys(listErrors).length ? { list_errors: listErrors } : {}),
+      videos: items,
     },
   };
 }
